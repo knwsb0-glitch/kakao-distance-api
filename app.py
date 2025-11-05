@@ -2,42 +2,57 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import math
+import time
 
 app = Flask(__name__)
 CORS(app)
 
-# 🔹 본인 REST API 키 입력
-KAKAO_API_KEY = "c6d24f0796bfca964b2de3f25ae8a0ee"
+KAKAO_REST_KEY = "c6d24f0796bfca964b2de3f25ae8a0ee"
 
-def get_distance(origin, destination):
-    """카카오 내비 API로 거리(km)와 예상 시간(분) 계산"""
+# 🔹 주소 → 좌표 변환
+def get_coordinates(address, retry=2):
+    url = "https://dapi.kakao.com/v2/local/search/address.json"
+    headers = {"Authorization": f"KakaoAK {KAKAO_REST_KEY}"}
+    params = {"query": address}
+
+    for _ in range(retry):
+        res = requests.get(url, headers=headers, params=params)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("documents"):
+                x = data["documents"][0]["x"]  # 경도
+                y = data["documents"][0]["y"]  # 위도
+                return f"{x},{y}"
+        time.sleep(0.5)  # 재시도 대기
+
+    return None
+
+# 🔹 좌표 → 거리 계산
+def get_distance(origin_coord, dest_coord):
     url = "https://apis-navi.kakaomobility.com/v1/directions"
-    headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+    headers = {"Authorization": f"KakaoAK {KAKAO_REST_KEY}"}
     params = {
-        "origin": origin,         # 예: "126.9784,37.5667"
-        "destination": destination,  # 예: "127.0286,37.4979"
-        "priority": "RECOMMEND"   # ✅ 추천경로 사용
+        "origin": origin_coord,
+        "destination": dest_coord,
+        "priority": "RECOMMEND"
     }
 
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        data = response.json()
+    res = requests.get(url, headers=headers, params=params)
+    if res.status_code != 200:
+        return None, None
 
-        # ✅ 응답 정상 처리
-        if response.status_code == 200 and "routes" in data:
-            route = data["routes"][0]["summary"]
-            distance_km = round(route["distance"] / 1000, 1)
-            duration_min = math.ceil(route["duration"] / 60)
-            return {"distance_km": distance_km, "duration_min": duration_min}
-        else:
-            return {"error": data.get("msg", "Invalid address")}
-    except Exception as e:
-        return {"error": str(e)}
+    try:
+        route = res.json()["routes"][0]["summary"]
+        distance_km = round(route["distance"] / 1000, 1)
+        duration_min = math.ceil(route["duration"] / 60)
+        return distance_km, duration_min
+    except Exception:
+        return None, None
 
 
 @app.route("/")
 def home():
-    return "🚀 Kakao Distance API 정상 작동 중입니다."
+    return "✅ Kakao Distance API 정상 작동 중!"
 
 
 @app.route("/distance", methods=["GET"])
@@ -46,10 +61,27 @@ def distance():
     destination = request.args.get("destination")
 
     if not origin or not destination:
-        return jsonify({"error": "origin과 destination 파라미터가 필요합니다."}), 400
+        return jsonify({"error": "origin and destination required"}), 400
 
-    result = get_distance(origin, destination)
-    return jsonify(result)
+    # 주소 → 좌표 변환
+    origin_coord = get_coordinates(origin)
+    dest_coord = get_coordinates(destination)
+
+    if not origin_coord or not dest_coord:
+        return jsonify({"error": "Invalid address"}), 400
+
+    # 거리 계산
+    distance_km, duration_min = get_distance(origin_coord, dest_coord)
+
+    if distance_km is None:
+        return jsonify({"error": "Failed to calculate distance"}), 500
+
+    return jsonify({
+        "origin": origin,
+        "destination": destination,
+        "distance_km": distance_km,
+        "duration_min": duration_min
+    })
 
 
 if __name__ == "__main__":
